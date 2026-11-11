@@ -26,6 +26,28 @@ const MAX_SLIPPAGE_BPS = 300;
 const closes: bigint[] = [];
 let entryClose: bigint | null = null;
 
+/** Highest close of the last LOOKBACK bars, excluding the latest one. */
+function recentMax(): bigint {
+  let m = closes[closes.length - LOOKBACK - 1];
+  for (let i = closes.length - LOOKBACK; i < closes.length - 1; i++) {
+    if (closes[i] > m) m = closes[i];
+  }
+  return m;
+}
+
+/** True when the latest close has dipped DROP_BPS below the 240-bar high. */
+function dipped(close: bigint): boolean {
+  return close * 10000n <= recentMax() * (10000n - DROP_BPS);
+}
+
+/** True when a held position has hit its take-profit or stop-loss. */
+function shouldExit(close: bigint): boolean {
+  if (entryClose === null) return false;
+  const up = (close * 10000n) >= (entryClose * (10000n + TP_BPS));
+  const down = (close * 10000n) <= (entryClose * (10000n - SL_BPS));
+  return up || down;
+}
+
 await runBars({
   onBatch(state: BarsState, batch) {
     const close = state.close(SYMBOL);
@@ -34,20 +56,14 @@ await runBars({
     const held = state.positions.get(SYMBOL);
     if (held !== undefined) {
       if (entryClose === null) entryClose = close;
-      const up = (close * 10000n) >= (entryClose * (10000n + TP_BPS));
-      const down = (close * 10000n) <= (entryClose * (10000n - SL_BPS));
-      if (up || down) {
+      if (shouldExit(close)) {
         entryClose = null;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS }];
       }
       return [];
     }
     if (closes.length < LOOKBACK + 1) return [];
-    let recentMax = closes[closes.length - LOOKBACK - 1];
-    for (let i = closes.length - LOOKBACK; i < closes.length - 1; i++) {
-      if (closes[i] > recentMax) recentMax = closes[i];
-    }
-    if (close * 10000n <= recentMax * (10000n - DROP_BPS)) {
+    if (dipped(close)) {
       entryClose = close;
       const room = state.weightRoom(SYMBOL);
       let spend = state.cash < room ? state.cash : room;
